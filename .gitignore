@@ -30,7 +30,14 @@ yarn-error.*
 .DS_Store
 *.pem
 
+# Claude Code session data
+.claude/
+
+# Internal docs
+docs/
+
 # local env files
+.env
 .env*.local
 
 # typescript
