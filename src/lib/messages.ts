@@ -3,6 +3,7 @@ import { Message } from '../types'
 import * as FileSystem from 'expo-file-system/legacy'
 
 const DISCOVERY_RADIUS_METERS = 100
+const MAP_RADIUS_METERS = 25000
 const POSTING_RADIUS_METERS = 25
 
 export async function fetchNearbyMessages(
@@ -20,26 +21,41 @@ export async function fetchNearbyMessages(
   ) as Message[]
 }
 
+export async function fetchMapMessages(
+  latitude: number,
+  longitude: number
+): Promise<Message[]> {
+  const { data, error } = await supabase.rpc('get_nearby_messages', {
+    lat: latitude,
+    lon: longitude,
+    radius: MAP_RADIUS_METERS,
+  })
+  if (error) throw error
+  return (data ?? []).map(extractCoords).filter(
+    (m: any) => typeof m.latitude === 'number' && typeof m.longitude === 'number'
+  ) as Message[]
+}
+
 function extractCoords(msg: any): any {
   if (typeof msg.latitude === 'number' && typeof msg.longitude === 'number') return msg
-  // location is a PostGIS EWKB hex string — decode it
   if (typeof msg.location !== 'string') return msg
   try {
     let offset = 2 // skip byte order byte
-    const geomType = parseInt(msg.location.slice(offset, offset + 8), 16)
+    // geomType is little-endian — SRID flag (0x20000000) lives in the 4th byte
+    // which is the last 2 hex chars of the 8-char geomType field
+    const hasSRID = msg.location.slice(offset + 6, offset + 8).toLowerCase() === '20'
     offset += 8
-    if (geomType & 0x20000000) offset += 8 // skip SRID if present
+    if (hasSRID) offset += 8 // skip 4-byte SRID value
     const buf = new ArrayBuffer(8)
     const view = new DataView(buf)
     const readDouble = (hex: string) => {
       for (let i = 0; i < 8; i++) view.setUint8(i, parseInt(hex.slice(i * 2, i * 2 + 2), 16))
       return view.getFloat64(0, true)
     }
-    return {
-      ...msg,
-      longitude: readDouble(msg.location.slice(offset, offset + 16)),
-      latitude: readDouble(msg.location.slice(offset + 16, offset + 32)),
-    }
+    const longitude = readDouble(msg.location.slice(offset, offset + 16))
+    const latitude = readDouble(msg.location.slice(offset + 16, offset + 32))
+    if (isNaN(longitude) || isNaN(latitude)) return msg
+    return { ...msg, longitude, latitude }
   } catch {
     return msg
   }
@@ -124,6 +140,41 @@ export async function postMessage(
 
   if (error) throw error
   return data
+}
+
+export async function fetchMyMessages(deviceId: string): Promise<Message[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('device_id', deviceId)
+    .is('parent_id', null)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return (data ?? []).map(extractCoords) as Message[]
+}
+
+export async function fetchReplyCounts(rootIds: string[]): Promise<Record<string, number>> {
+  if (rootIds.length === 0) return {}
+  const { data, error } = await supabase
+    .from('messages')
+    .select('root_id')
+    .in('root_id', rootIds)
+  if (error) return {}
+  const counts: Record<string, number> = {}
+  for (const row of (data ?? [])) {
+    counts[row.root_id] = (counts[row.root_id] ?? 0) + 1
+  }
+  return counts
+}
+
+export async function fetchReplies(rootId: string): Promise<Message[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('root_id', rootId)
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return (data ?? []).map(extractCoords) as Message[]
 }
 
 export async function incrementPlayCount(messageId: string): Promise<void> {

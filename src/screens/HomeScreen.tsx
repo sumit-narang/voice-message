@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Animated,
   Dimensions,
   FlatList,
@@ -8,13 +9,20 @@ import {
   TouchableOpacity,
   View,
   Alert,
-  ActivityIndicator,
 } from 'react-native'
 import * as Location from 'expo-location'
 import MapboxGL from '@rnmapbox/maps'
 import { useRecorder } from '../hooks/useRecorder'
 import { usePlayer } from '../hooks/usePlayer'
-import { checkCanPost, fetchNearbyMessages, postMessage, uploadAudio } from '../lib/messages'
+import {
+  checkCanPost,
+  fetchMapMessages,
+  fetchMyMessages,
+  fetchNearbyMessages,
+  fetchReplyCounts,
+  postMessage,
+  uploadAudio,
+} from '../lib/messages'
 import { Message } from '../types'
 
 MapboxGL.setAccessToken(process.env.EXPO_PUBLIC_MAPBOX_TOKEN!)
@@ -23,15 +31,23 @@ const { width } = Dimensions.get('window')
 const BUTTON_SIZE = width * 0.28
 const MAX_DURATION_MS = 20000
 
-type Props = { deviceId: string }
-type Tab = 'voice' | 'play'
+type Props = {
+  deviceId: string
+  onSelectMessage: (msg: Message) => void
+}
+type Tab = 'voice' | 'play' | 'mine'
 
-export default function HomeScreen({ deviceId }: Props) {
+export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
   const [location, setLocation] = useState<Location.LocationObject | null>(null)
   const [permissionError, setPermissionError] = useState(false)
+  const [mapMessages, setMapMessages] = useState<Message[]>([])
   const [nearbyMessages, setNearbyMessages] = useState<Message[]>([])
+  const [myMessages, setMyMessages] = useState<Message[]>([])
+  const [replyCounts, setReplyCounts] = useState<Record<string, number>>({})
+  const [mineLoading, setMineLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('voice')
+  const mineLoadedRef = useRef(false)
 
   const { state, uri, durationMs, startRecording, stopRecording, reset } = useRecorder()
   const { play, stop, playingId, state: playerState } = usePlayer()
@@ -44,18 +60,11 @@ export default function HomeScreen({ deviceId }: Props) {
   useEffect(() => { if (location) loadNearby() }, [location])
 
   useEffect(() => {
-    if (state === 'recording') {
-      startPulse()
-      startProgress()
-    } else {
-      stopPulse()
-      progressAnim.setValue(0)
-    }
+    if (state === 'recording') { startPulse(); startProgress() }
+    else { stopPulse(); progressAnim.setValue(0) }
   }, [state])
 
-  useEffect(() => {
-    if (state === 'done' && uri) handleUpload()
-  }, [state, uri])
+  useEffect(() => { if (state === 'done' && uri) handleUpload() }, [state, uri])
 
   async function requestLocation() {
     const { status } = await Location.requestForegroundPermissionsAsync()
@@ -67,9 +76,30 @@ export default function HomeScreen({ deviceId }: Props) {
   async function loadNearby() {
     if (!location) return
     try {
-      const messages = await fetchNearbyMessages(location.coords.latitude, location.coords.longitude)
-      setNearbyMessages(messages)
+      const [map, nearby] = await Promise.all([
+        fetchMapMessages(location.coords.latitude, location.coords.longitude),
+        fetchNearbyMessages(location.coords.latitude, location.coords.longitude),
+      ])
+      setMapMessages(map)
+      setNearbyMessages(nearby)
     } catch {}
+  }
+
+  async function loadMine() {
+    setMineLoading(true)
+    try {
+      const msgs = await fetchMyMessages(deviceId)
+      setMyMessages(msgs)
+      const counts = await fetchReplyCounts(msgs.map(m => m.id))
+      setReplyCounts(counts)
+    } catch {}
+    setMineLoading(false)
+    mineLoadedRef.current = true
+  }
+
+  function handleMineTab() {
+    setActiveTab('mine')
+    if (!mineLoadedRef.current) loadMine()
   }
 
   async function handlePressIn() {
@@ -82,7 +112,7 @@ export default function HomeScreen({ deviceId }: Props) {
     startRecording()
   }
 
-  async function handlePressOut() {
+  function handlePressOut() {
     if (state !== 'recording') return
     if (durationMs < 1000) { reset(); return }
     stopRecording()
@@ -95,6 +125,7 @@ export default function HomeScreen({ deviceId }: Props) {
       const audioPath = await uploadAudio(deviceId, uri)
       await postMessage(deviceId, audioPath, location.coords.latitude, location.coords.longitude)
       await loadNearby()
+      mineLoadedRef.current = false
     } catch {
       Alert.alert('Failed to post', 'Something went wrong. Please try again.')
     } finally {
@@ -123,11 +154,6 @@ export default function HomeScreen({ deviceId }: Props) {
     Animated.timing(progressAnim, { toValue: 1, duration: MAX_DURATION_MS, useNativeDriver: false }).start()
   }
 
-  function handlePinTap(msg: Message) {
-    setActiveTab('play')
-    play(msg.id, msg.audio_url)
-  }
-
   const progressWidth = progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] })
   const isRecording = state === 'recording'
   const isDisabled = uploading || state === 'done'
@@ -142,7 +168,6 @@ export default function HomeScreen({ deviceId }: Props) {
 
   return (
     <View style={styles.container}>
-      {/* Full screen map */}
       <MapboxGL.MapView
         style={StyleSheet.absoluteFillObject}
         styleURL={MapboxGL.StyleURL.Street}
@@ -159,22 +184,19 @@ export default function HomeScreen({ deviceId }: Props) {
             animationDuration={800}
           />
         )}
-
         <MapboxGL.UserLocation visible renderMode="native" />
-
-        {nearbyMessages.map(msg => (
+        {mapMessages.map(msg => (
           <MapboxGL.PointAnnotation
             key={msg.id}
             id={msg.id}
             coordinate={[msg.longitude, msg.latitude]}
-            onSelected={() => handlePinTap(msg)}
+            onSelected={() => onSelectMessage(msg)}
           >
             <View style={[styles.pin, playingId === msg.id && styles.pinPlaying]} />
           </MapboxGL.PointAnnotation>
         ))}
       </MapboxGL.MapView>
 
-      {/* Voice tab: record button floats above the tab bar */}
       {activeTab === 'voice' && (
         <View style={styles.recordOverlay} pointerEvents="box-none">
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
@@ -192,27 +214,22 @@ export default function HomeScreen({ deviceId }: Props) {
               )}
             </TouchableOpacity>
           </Animated.View>
-
           {isRecording && (
             <View style={styles.progressContainer}>
               <Animated.View style={[styles.progressBar, { width: progressWidth }]} />
             </View>
           )}
-
           <Text style={styles.hint}>
             {isRecording
               ? `${Math.ceil((MAX_DURATION_MS - durationMs) / 1000)}s`
-              : uploading
-              ? 'Posting...'
-              : 'Hold to leave a note'}
+              : uploading ? 'Posting...' : 'Hold to leave a note'}
           </Text>
         </View>
       )}
 
-      {/* Play tab: full separate page */}
       {activeTab === 'play' && (
-        <View style={styles.playPage}>
-          <Text style={styles.playPageTitle}>Nearby Notes</Text>
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Nearby Notes</Text>
           {nearbyMessages.length === 0 ? (
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>No voice notes nearby</Text>
@@ -225,24 +242,82 @@ export default function HomeScreen({ deviceId }: Props) {
               showsVerticalScrollIndicator={false}
               renderItem={({ item }) => {
                 const isPlaying = playingId === item.id && playerState === 'playing'
-                const isLoading = playingId === item.id && playerState === 'loading'
+                const isLoadingPlay = playingId === item.id && playerState === 'loading'
+                return (
+                  <View style={[styles.card, isPlaying && styles.cardActive]}>
+                    <TouchableOpacity
+                      style={styles.cardMain}
+                      onPress={() => play(item.id, item.audio_url)}
+                      activeOpacity={0.8}
+                    >
+                      <View>
+                        <Text style={styles.cardLabel}>Voice note</Text>
+                        <Text style={styles.cardTime}>{formatExpiry(item.expires_at)}</Text>
+                      </View>
+                      <View style={styles.cardActions}>
+                        {isLoadingPlay ? (
+                          <ActivityIndicator size="small" color="#4444ff" />
+                        ) : (
+                          <Text style={[styles.playIcon, isPlaying && styles.playIconActive]}>
+                            {isPlaying ? '■' : '▶'}
+                          </Text>
+                        )}
+                        <TouchableOpacity
+                          style={styles.replyBtn}
+                          onPress={() => onSelectMessage(item)}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Text style={styles.replyIcon}>↩</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+                )
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {activeTab === 'mine' && (
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>My Notes</Text>
+          {mineLoading ? (
+            <View style={styles.emptyContainer}>
+              <ActivityIndicator color="#4444ff" />
+            </View>
+          ) : myMessages.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyText}>You haven't left any notes yet</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={myMessages}
+              keyExtractor={item => item.id}
+              contentContainerStyle={styles.listContent}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => {
+                const count = replyCounts[item.id] ?? 0
                 return (
                   <TouchableOpacity
-                    style={[styles.messageCard, isPlaying && styles.messageCardActive]}
-                    onPress={() => play(item.id, item.audio_url)}
+                    style={styles.card}
+                    onPress={() => onSelectMessage(item)}
                     activeOpacity={0.8}
                   >
-                    <View>
-                      <Text style={styles.messageLabel}>Voice note</Text>
-                      <Text style={styles.messageTime}>{formatExpiry(item.expires_at)}</Text>
+                    <View style={styles.cardMain}>
+                      <View>
+                        <Text style={styles.cardLabel}>Voice note</Text>
+                        <Text style={styles.cardTime}>{formatExpiry(item.expires_at)}</Text>
+                      </View>
+                      <View style={styles.cardActions}>
+                        {count > 0 && (
+                          <View style={styles.replyBadge}>
+                            <Text style={styles.replyBadgeText}>{count}</Text>
+                          </View>
+                        )}
+                        <Text style={styles.chevron}>›</Text>
+                      </View>
                     </View>
-                    {isLoading ? (
-                      <ActivityIndicator size="small" color="#4444ff" />
-                    ) : (
-                      <Text style={[styles.playIcon, isPlaying && styles.playIconActive]}>
-                        {isPlaying ? '■' : '▶'}
-                      </Text>
-                    )}
                   </TouchableOpacity>
                 )
               }}
@@ -251,24 +326,28 @@ export default function HomeScreen({ deviceId }: Props) {
         </View>
       )}
 
-      {/* Floating pill tab bar */}
       <View style={styles.tabBarWrapper} pointerEvents="box-none">
         <View style={styles.tabPill}>
           <TouchableOpacity
             style={[styles.tabBtn, activeTab === 'voice' && styles.tabBtnActive]}
             onPress={() => { stop(); setActiveTab('voice') }}
           >
-            <Text style={[styles.tabLabel, activeTab === 'voice' && styles.tabLabelActive]}>
-              🎙 Voice
-            </Text>
+            <Text style={[styles.tabLabel, activeTab === 'voice' && styles.tabLabelActive]}>🎙 Voice</Text>
           </TouchableOpacity>
-
           <TouchableOpacity
             style={[styles.tabBtn, activeTab === 'play' && styles.tabBtnActive]}
             onPress={() => setActiveTab('play')}
           >
             <Text style={[styles.tabLabel, activeTab === 'play' && styles.tabLabelActive]}>
               {`▶ Play${nearbyMessages.length > 0 ? `  ${nearbyMessages.length}` : ''}`}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'mine' && styles.tabBtnActive]}
+            onPress={handleMineTab}
+          >
+            <Text style={[styles.tabLabel, activeTab === 'mine' && styles.tabLabelActive]}>
+              {`👤 Mine${Object.values(replyCounts).some(c => c > 0) ? '  ●' : ''}`}
             </Text>
           </TouchableOpacity>
         </View>
@@ -287,193 +366,100 @@ function formatExpiry(expiresAt: string): string {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#111111',
-  },
+  container: { flex: 1, backgroundColor: '#111111' },
   center: {
-    flex: 1,
-    backgroundColor: '#111111',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 32,
+    flex: 1, backgroundColor: '#111111',
+    alignItems: 'center', justifyContent: 'center', padding: 32,
   },
-  errorText: {
-    color: '#888',
-    textAlign: 'center',
-    fontSize: 16,
-  },
+  errorText: { color: '#888', textAlign: 'center', fontSize: 16 },
 
-  // Map pins
   pin: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#4444ff',
-    borderWidth: 2.5,
-    borderColor: '#fff',
-    shadowColor: '#4444ff',
-    shadowOpacity: 0.8,
-    shadowRadius: 6,
+    width: 18, height: 18, borderRadius: 9,
+    backgroundColor: '#4444ff', borderWidth: 2.5, borderColor: '#fff',
+    shadowColor: '#4444ff', shadowOpacity: 0.8, shadowRadius: 6,
     shadowOffset: { width: 0, height: 0 },
   },
-  pinPlaying: {
-    backgroundColor: '#ff4444',
-    shadowColor: '#ff4444',
-  },
+  pinPlaying: { backgroundColor: '#ff4444', shadowColor: '#ff4444' },
 
-  // Record overlay
   recordOverlay: {
     ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    paddingBottom: 110,
+    alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 110,
   },
   recordButton: {
-    width: BUTTON_SIZE,
-    height: BUTTON_SIZE,
-    borderRadius: BUTTON_SIZE / 2,
-    backgroundColor: 'rgba(15, 15, 40, 0.88)',
-    borderWidth: 3,
-    borderColor: '#4444ff',
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: BUTTON_SIZE, height: BUTTON_SIZE, borderRadius: BUTTON_SIZE / 2,
+    backgroundColor: 'rgba(15, 15, 40, 0.88)', borderWidth: 3, borderColor: '#4444ff',
+    alignItems: 'center', justifyContent: 'center',
   },
-  recordButtonActive: {
-    borderColor: '#6666ff',
-    backgroundColor: 'rgba(15, 15, 60, 0.92)',
-  },
+  recordButtonActive: { borderColor: '#6666ff', backgroundColor: 'rgba(15, 15, 60, 0.92)' },
   recordInner: {
-    width: BUTTON_SIZE * 0.45,
-    height: BUTTON_SIZE * 0.45,
-    borderRadius: BUTTON_SIZE * 0.225,
-    backgroundColor: '#4444ff',
+    width: BUTTON_SIZE * 0.45, height: BUTTON_SIZE * 0.45,
+    borderRadius: BUTTON_SIZE * 0.225, backgroundColor: '#4444ff',
   },
   recordInnerActive: {
-    backgroundColor: '#ff4444',
-    borderRadius: 6,
-    width: BUTTON_SIZE * 0.35,
-    height: BUTTON_SIZE * 0.35,
+    backgroundColor: '#ff4444', borderRadius: 6,
+    width: BUTTON_SIZE * 0.35, height: BUTTON_SIZE * 0.35,
   },
   progressContainer: {
-    width: BUTTON_SIZE,
-    height: 3,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 2,
-    marginTop: 14,
-    overflow: 'hidden',
+    width: BUTTON_SIZE, height: 3, backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 2, marginTop: 14, overflow: 'hidden',
   },
-  progressBar: {
-    height: 3,
-    backgroundColor: '#4444ff',
-    borderRadius: 2,
-  },
+  progressBar: { height: 3, backgroundColor: '#4444ff', borderRadius: 2 },
   hint: {
-    color: '#ddd',
-    fontSize: 13,
-    marginTop: 10,
-    letterSpacing: 0.4,
-    height: 18,
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowRadius: 6,
+    color: '#ddd', fontSize: 13, marginTop: 10, letterSpacing: 0.4, height: 18,
+    textShadowColor: 'rgba(0,0,0,0.8)', textShadowRadius: 6,
     textShadowOffset: { width: 0, height: 1 },
   },
 
-  // Play page
-  playPage: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#f5f5f0',
-    paddingBottom: 100,
+  panel: {
+    ...StyleSheet.absoluteFillObject, backgroundColor: '#f5f5f0', paddingBottom: 100,
   },
-  playPageTitle: {
-    color: '#111',
-    fontSize: 22,
-    fontWeight: '700',
-    paddingHorizontal: 20,
-    paddingTop: 64,
-    paddingBottom: 12,
+  panelTitle: {
+    color: '#111', fontSize: 22, fontWeight: '700',
+    paddingHorizontal: 20, paddingTop: 64, paddingBottom: 12,
   },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingTop: 4,
-  },
-  emptyContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyText: {
-    color: '#999',
-    fontSize: 15,
-  },
-  messageCard: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#e8e8e8',
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
+  listContent: { paddingHorizontal: 16, paddingTop: 4 },
+  emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  emptyText: { color: '#999', fontSize: 15 },
+
+  card: {
+    backgroundColor: '#fff', borderRadius: 14, marginBottom: 10,
+    borderWidth: 1, borderColor: '#e8e8e8', overflow: 'hidden',
+    shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
   },
-  messageCardActive: {
-    borderColor: '#4444ff',
+  cardActive: { borderColor: '#4444ff' },
+  cardMain: {
+    flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'center', padding: 16,
   },
-  messageLabel: {
-    color: '#111',
-    fontSize: 14,
-    fontWeight: '500',
-    marginBottom: 4,
+  cardActions: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  cardLabel: { color: '#111', fontSize: 14, fontWeight: '500', marginBottom: 4 },
+  cardTime: { color: '#999', fontSize: 12 },
+  playIcon: { color: '#4444ff', fontSize: 18 },
+  playIconActive: { color: '#ff4444' },
+  replyBtn: {
+    width: 30, height: 30, alignItems: 'center', justifyContent: 'center',
+    borderRadius: 15, backgroundColor: '#f0f0f0',
   },
-  messageTime: {
-    color: '#999',
-    fontSize: 12,
-  },
-  playIcon: {
-    color: '#4444ff',
-    fontSize: 18,
-  },
-  playIconActive: {
-    color: '#ff4444',
-  },
+  replyIcon: { fontSize: 15, color: '#888' },
 
-  // Tab bar
+  replyBadge: {
+    backgroundColor: '#4444ff', borderRadius: 10,
+    minWidth: 22, height: 22, paddingHorizontal: 6,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  replyBadgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  chevron: { fontSize: 22, color: '#ccc' },
+
   tabBarWrapper: {
-    position: 'absolute',
-    bottom: 36,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
+    position: 'absolute', bottom: 36, left: 0, right: 0, alignItems: 'center',
   },
   tabPill: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(15, 15, 25, 0.93)',
-    borderRadius: 32,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: '#252535',
-    gap: 4,
+    flexDirection: 'row', backgroundColor: 'rgba(15, 15, 25, 0.93)',
+    borderRadius: 32, padding: 4, borderWidth: 1, borderColor: '#252535', gap: 4,
   },
-  tabBtn: {
-    paddingHorizontal: 28,
-    paddingVertical: 13,
-    borderRadius: 28,
-  },
-  tabBtnActive: {
-    backgroundColor: '#4444ff',
-  },
-  tabLabel: {
-    color: '#666',
-    fontSize: 15,
-    fontWeight: '600',
-    letterSpacing: 0.3,
-  },
-  tabLabelActive: {
-    color: '#fff',
-  },
+  tabBtn: { paddingHorizontal: 20, paddingVertical: 13, borderRadius: 28 },
+  tabBtnActive: { backgroundColor: '#4444ff' },
+  tabLabel: { color: '#666', fontSize: 15, fontWeight: '600', letterSpacing: 0.3 },
+  tabLabelActive: { color: '#fff' },
 })
