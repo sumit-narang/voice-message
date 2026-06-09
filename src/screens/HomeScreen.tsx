@@ -28,14 +28,14 @@ import { Message } from '../types'
 MapboxGL.setAccessToken(process.env.EXPO_PUBLIC_MAPBOX_TOKEN!)
 
 const { width } = Dimensions.get('window')
-const BUTTON_SIZE = width * 0.28
+const BUTTON_SIZE = width * 0.32
 const MAX_DURATION_MS = 20000
 
 type Props = {
   deviceId: string
   onSelectMessage: (msg: Message) => void
 }
-type Tab = 'voice' | 'play' | 'mine'
+type Tab = 'map' | 'play' | 'record' | 'mine'
 
 export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
   const [location, setLocation] = useState<Location.LocationObject | null>(null)
@@ -46,7 +46,7 @@ export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
   const [replyCounts, setReplyCounts] = useState<Record<string, number>>({})
   const [mineLoading, setMineLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [activeTab, setActiveTab] = useState<Tab>('voice')
+  const [activeTab, setActiveTab] = useState<Tab>('map')
   const mineLoadedRef = useRef(false)
 
   const { state, uri, durationMs, startRecording, stopRecording, reset } = useRecorder()
@@ -126,6 +126,7 @@ export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
       await postMessage(deviceId, audioPath, location.coords.latitude, location.coords.longitude)
       await loadNearby()
       mineLoadedRef.current = false
+      setActiveTab('map')
     } catch {
       Alert.alert('Failed to post', 'Something went wrong. Please try again.')
     } finally {
@@ -168,8 +169,9 @@ export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
 
   return (
     <View style={styles.container}>
+      {/* Map — always mounted so state persists across tab switches */}
       <MapboxGL.MapView
-        style={StyleSheet.absoluteFillObject}
+        style={[StyleSheet.absoluteFillObject, (activeTab !== 'map') && styles.hidden]}
         styleURL={MapboxGL.StyleURL.Street}
         logoEnabled={false}
         attributionEnabled={false}
@@ -197,36 +199,41 @@ export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
         ))}
       </MapboxGL.MapView>
 
-      {activeTab === 'voice' && (
-        <View style={styles.recordOverlay} pointerEvents="box-none">
-          <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-            <TouchableOpacity
-              style={[styles.recordButton, isRecording && styles.recordButtonActive]}
-              onPressIn={handlePressIn}
-              onPressOut={handlePressOut}
-              activeOpacity={1}
-              disabled={isDisabled}
-            >
-              {uploading ? (
-                <ActivityIndicator color="#4444ff" size="large" />
-              ) : (
-                <View style={[styles.recordInner, isRecording && styles.recordInnerActive]} />
-              )}
-            </TouchableOpacity>
-          </Animated.View>
-          {isRecording && (
-            <View style={styles.progressContainer}>
-              <Animated.View style={[styles.progressBar, { width: progressWidth }]} />
-            </View>
-          )}
-          <Text style={styles.hint}>
-            {isRecording
-              ? `${Math.ceil((MAX_DURATION_MS - durationMs) / 1000)}s`
-              : uploading ? 'Posting...' : 'Hold to leave a note'}
-          </Text>
+      {/* Record page */}
+      {activeTab === 'record' && (
+        <View style={styles.recordPage}>
+          <Text style={styles.recordPageTitle}>Leave a note</Text>
+          <View style={styles.recordPageBody}>
+            <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
+              <TouchableOpacity
+                style={[styles.recordButton, isRecording && styles.recordButtonActive]}
+                onPressIn={handlePressIn}
+                onPressOut={handlePressOut}
+                activeOpacity={1}
+                disabled={isDisabled}
+              >
+                {uploading ? (
+                  <ActivityIndicator color="#4444ff" size="large" />
+                ) : (
+                  <View style={[styles.recordInner, isRecording && styles.recordInnerActive]} />
+                )}
+              </TouchableOpacity>
+            </Animated.View>
+            {isRecording && (
+              <View style={styles.progressContainer}>
+                <Animated.View style={[styles.progressBar, { width: progressWidth }]} />
+              </View>
+            )}
+            <Text style={styles.hint}>
+              {isRecording
+                ? `${Math.ceil((MAX_DURATION_MS - durationMs) / 1000)}s remaining`
+                : uploading ? 'Posting...' : 'Hold to record · release to post'}
+            </Text>
+          </View>
         </View>
       )}
 
+      {/* Play page */}
       {activeTab === 'play' && (
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>Nearby Notes</Text>
@@ -279,6 +286,7 @@ export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
         </View>
       )}
 
+      {/* Mine page */}
       {activeTab === 'mine' && (
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>My Notes</Text>
@@ -326,28 +334,35 @@ export default function HomeScreen({ deviceId, onSelectMessage }: Props) {
         </View>
       )}
 
+      {/* Tab bar */}
       <View style={styles.tabBarWrapper} pointerEvents="box-none">
         <View style={styles.tabPill}>
           <TouchableOpacity
-            style={[styles.tabBtn, activeTab === 'voice' && styles.tabBtnActive]}
-            onPress={() => { stop(); setActiveTab('voice') }}
+            style={[styles.tabBtn, activeTab === 'map' && styles.tabBtnActive]}
+            onPress={() => { stop(); setActiveTab('map') }}
           >
-            <Text style={[styles.tabLabel, activeTab === 'voice' && styles.tabLabelActive]}>🎙 Voice</Text>
+            <Text style={[styles.tabLabel, activeTab === 'map' && styles.tabLabelActive]}>Map</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.tabBtn, activeTab === 'play' && styles.tabBtnActive]}
             onPress={() => setActiveTab('play')}
           >
             <Text style={[styles.tabLabel, activeTab === 'play' && styles.tabLabelActive]}>
-              {`▶ Play${nearbyMessages.length > 0 ? `  ${nearbyMessages.length}` : ''}`}
+              {`Play${nearbyMessages.length > 0 ? `  ${nearbyMessages.length}` : ''}`}
             </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'record' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('record')}
+          >
+            <Text style={[styles.tabLabel, activeTab === 'record' && styles.tabLabelActive]}>Record</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.tabBtn, activeTab === 'mine' && styles.tabBtnActive]}
             onPress={handleMineTab}
           >
             <Text style={[styles.tabLabel, activeTab === 'mine' && styles.tabLabelActive]}>
-              {`👤 Mine${Object.values(replyCounts).some(c => c > 0) ? '  ●' : ''}`}
+              {`Mine${Object.values(replyCounts).some(c => c > 0) ? '  ●' : ''}`}
             </Text>
           </TouchableOpacity>
         </View>
@@ -367,6 +382,7 @@ function formatExpiry(expiresAt: string): string {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#111111' },
+  hidden: { opacity: 0 },
   center: {
     flex: 1, backgroundColor: '#111111',
     alignItems: 'center', justifyContent: 'center', padding: 32,
@@ -381,9 +397,18 @@ const styles = StyleSheet.create({
   },
   pinPlaying: { backgroundColor: '#ff4444', shadowColor: '#ff4444' },
 
-  recordOverlay: {
+  // Record page
+  recordPage: {
     ...StyleSheet.absoluteFillObject,
-    alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 110,
+    backgroundColor: '#0d0d1a',
+    paddingBottom: 100,
+  },
+  recordPageTitle: {
+    color: '#fff', fontSize: 22, fontWeight: '700',
+    paddingHorizontal: 20, paddingTop: 64, paddingBottom: 12,
+  },
+  recordPageBody: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 20,
   },
   recordButton: {
     width: BUTTON_SIZE, height: BUTTON_SIZE, borderRadius: BUTTON_SIZE / 2,
@@ -401,15 +426,12 @@ const styles = StyleSheet.create({
   },
   progressContainer: {
     width: BUTTON_SIZE, height: 3, backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 2, marginTop: 14, overflow: 'hidden',
+    borderRadius: 2, overflow: 'hidden',
   },
   progressBar: { height: 3, backgroundColor: '#4444ff', borderRadius: 2 },
-  hint: {
-    color: '#ddd', fontSize: 13, marginTop: 10, letterSpacing: 0.4, height: 18,
-    textShadowColor: 'rgba(0,0,0,0.8)', textShadowRadius: 6,
-    textShadowOffset: { width: 0, height: 1 },
-  },
+  hint: { color: '#888', fontSize: 13, letterSpacing: 0.3 },
 
+  // Shared panel (Play + Mine)
   panel: {
     ...StyleSheet.absoluteFillObject, backgroundColor: '#f5f5f0', paddingBottom: 100,
   },
@@ -442,7 +464,6 @@ const styles = StyleSheet.create({
     borderRadius: 15, backgroundColor: '#f0f0f0',
   },
   replyIcon: { fontSize: 15, color: '#888' },
-
   replyBadge: {
     backgroundColor: '#4444ff', borderRadius: 10,
     minWidth: 22, height: 22, paddingHorizontal: 6,
@@ -451,15 +472,16 @@ const styles = StyleSheet.create({
   replyBadgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   chevron: { fontSize: 22, color: '#ccc' },
 
+  // Tab bar
   tabBarWrapper: {
     position: 'absolute', bottom: 36, left: 0, right: 0, alignItems: 'center',
   },
   tabPill: {
     flexDirection: 'row', backgroundColor: 'rgba(15, 15, 25, 0.93)',
-    borderRadius: 32, padding: 4, borderWidth: 1, borderColor: '#252535', gap: 4,
+    borderRadius: 32, padding: 4, borderWidth: 1, borderColor: '#252535', gap: 2,
   },
-  tabBtn: { paddingHorizontal: 20, paddingVertical: 13, borderRadius: 28 },
+  tabBtn: { paddingHorizontal: 16, paddingVertical: 13, borderRadius: 28 },
   tabBtnActive: { backgroundColor: '#4444ff' },
-  tabLabel: { color: '#666', fontSize: 15, fontWeight: '600', letterSpacing: 0.3 },
+  tabLabel: { color: '#666', fontSize: 14, fontWeight: '600', letterSpacing: 0.2 },
   tabLabelActive: { color: '#fff' },
 })
